@@ -33,6 +33,8 @@ ACCEPT_UDP="false"
 TLS_CERT=""
 TLS_KEY=""
 PORTS_STRING="" # Comma-separated list of ports to tunnel
+HEARTBEAT="5" # Default value added
+CHANNEL_SIZE="1024" # Default value added
 
 # Client-specific settings
 REMOTE_IP="" # Hostname or IP
@@ -242,12 +244,15 @@ if [ -z "\$BOT_TOKEN_MON" ] || [ -z "\$CHAT_ID_MON" ]; then
 fi
 
 # Load ports from config (server or client mode)
+local main_port_val="3080" # Default value if not found
+local web_port_val="2060"  # Default value if not found
+
 if grep -q "^\\[server\\]" "\$CONFIG_FILE"; then
-    main_port=\$(get_config_value "server" "bind_addr" "3080" | sed 's/.*://') # Extract port from "0.0.0.0:PORT"
-    web_port=\$(get_config_value "server" "web_port" "2060")
+    main_port_val=\$(get_config_value "server" "bind_addr" "0.0.0.0:3080" | sed 's/.*://') # Extract port
+    web_port_val=\$(get_config_value "server" "web_port" "2060")
 elif grep -q "^\\[client\\]" "\$CONFIG_FILE"; then
-    main_port=\$(get_config_value "client" "remote_addr" "3080" | sed 's/.*://')
-    web_port=\$(get_config_value "client" "web_port" "2060")
+    main_port_val=\$(get_config_value "client" "remote_addr" "0.0.0.0:3080" | sed 's/.*://')
+    web_port_val=\$(get_config_value "client" "web_port" "2060")
 else
     monitor_log "ERROR" "Cannot determine server/client mode from config file. Exiting monitor."
     exit 1
@@ -255,31 +260,41 @@ fi
 
 # Check service status
 if ! systemctl is-active "\$SERVICE_NAME" >/dev/null; then
-    monitor_log "ERROR" "Backhaul service is down."
+    monitor_log "ERROR" "Backhaul service is DOWN."
     curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN_MON/sendMessage" \
         -d chat_id="\$CHAT_ID_MON" \
         -d text="🚨 Alert: Backhaul service is DOWN on \$(hostname)!" >/dev/null
     exit 1
 fi
 
-# Check ports (only if web_port is not 0, which means it's enabled)
-if [ "\$web_port" -ne 0 ] && (! ss -tuln | grep -q ":\$main_port" || ! ss -tuln | grep -q ":\$web_port"); then
-    monitor_log "ERROR" "One or more ports (main: \$main_port, web: \$web_port) are not open."
-    curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN_MON/sendMessage" \
-        -d chat_id="\$CHAT_ID_MON" \
-        -d text="⚠️ Alert: Backhaul ports (main: \$main_port, web: \$web_port) are NOT OPEN on \$(hostname)!" >/dev/null
-    exit 1
+# Check ports
+# If web_port is 0, it means it's disabled, so only check main_port.
+# If web_port is not 0, check both.
+local ports_ok=true
+if ! ss -tuln | grep -q ":\$main_port_val"; then
+    ports_ok=false
 fi
 
-# If web_port is 0, only check main_port
-if [ "\$web_port" -eq 0 ] && ! ss -tuln | grep -q ":\$main_port"; then
-    monitor_log "ERROR" "Main port (\$main_port) is not open (web_port is disabled)."
-    curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN_MON/sendMessage" \
-        -d chat_id="\$CHAT_ID_MON" \
-        -d text="⚠️ Alert: Backhaul main port (\$main_port) is NOT OPEN on \$(hostname)! (Web UI disabled)" >/dev/null
-    exit 1
+if [ "\$web_port_val" -ne 0 ]; then
+    if ! ss -tuln | grep -q ":\$web_port_val"; then
+        ports_ok=false
+    fi
 fi
 
+if [ "\$ports_ok" = false ]; then
+    monitor_log "ERROR" "One or more Backhaul ports are not open."
+    local port_message="⚠️ Alert: Backhaul ports on \$(hostname) are NOT OPEN! (Main: \$main_port_val"
+    if [ "\$web_port_val" -ne 0 ]; then
+        port_message+=", Web: \$web_port_val"
+    else
+        port_message+=" (Web UI disabled)"
+    fi
+    port_message+=")"
+    curl -s -X POST "https://api.telegram.org/bot\$BOT_TOKEN_MON/sendMessage" \
+        -d chat_id="\$CHAT_ID_MON" \
+        -d text="\$port_message" >/dev/null
+    exit 1
+fi
 
 monitor_log "INFO" "Backhaul service and ports are running normally."
 EOF
@@ -293,6 +308,8 @@ setup_monitoring_cron() {
     # Ensure monitoring script exists before adding cron
     create_monitor_script # Always re-create to ensure it's up-to-date
 
+    read_telegram_config # Make sure global BOT_TOKEN and CHAT_ID are up-to-date
+
     if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
         read -p "Enable periodic monitoring via cron (runs every 5 minutes)? (y/n, default y): " enable_cron
         enable_cron=${enable_cron:-y}
@@ -301,7 +318,7 @@ setup_monitoring_cron() {
             (crontab -l 2>/dev/null | fgrep -v "$MONITOR_SCRIPT"; echo "*/5 * * * * $MONITOR_SCRIPT") | crontab -
             log "INFO" "Cron job for monitoring set up to run every 5 minutes."
         else
-            log "INFO" "Periodic monitoring via cron disabled."
+            log "INFO" "Periodic monitoring via cron disabled by user."
             disable_monitoring_cron # Ensure it's disabled if user chooses 'n'
         fi
     else
@@ -334,7 +351,7 @@ telegram_status_report() {
     status=$(systemctl is-active "$SERVICE_NAME" || echo "inactive")
     local version="Unknown"
     if [ -x "${BACKHAUL_DIR}/backhaul" ]; then
-        version=$("${BACKHAUL_DIR}/backhaul" -v 2>/dev/null || echo "Unknown")
+        version=$("${BACKHAUL_DIR}/backhaul" -v 2>/dev/null | head -n 1 || echo "Unknown")
     fi
 
     # Ensure current config values are loaded
@@ -343,10 +360,25 @@ telegram_status_report() {
     local main_port_status="N/A"
     local web_port_status="N/A"
 
-    if ss -tuln | grep -q ":$MAIN_PORT"; then
-        main_port_status="OPEN"
-    else
-        main_port_status="CLOSED"
+    # Determine which port to check for main_port_status based on server_type
+    local service_main_port
+    if [ "$SERVER_TYPE" == "server" ]; then
+        service_main_port="$MAIN_PORT"
+    elif [ "$SERVER_TYPE" == "client" ]; then
+        # For client, main_port is the remote_addr port, which isn't bound locally
+        # We need to check if local listening ports (if any) are open, or just service active.
+        # For a client, its "main port" (remote_addr) is usually not locally bound.
+        # So we might not report "OPEN" unless it also listens on a local port.
+        # For now, let's just indicate it's a client.
+        service_main_port="N/A (Client Mode)"
+    fi
+
+    if [[ "$service_main_port" != "N/A (Client Mode)" ]]; then
+        if ss -tuln | grep -q ":$service_main_port"; then
+            main_port_status="OPEN"
+        else
+            main_port_status="CLOSED"
+        fi
     fi
 
     if [ "$WEB_PORT" -ne 0 ]; then
@@ -362,18 +394,22 @@ telegram_status_report() {
     local message="✨ Backhaul Status Report ($(hostname)) ✨
 - Service: *$status*
 - Version: *$version*
-- Role: *$SERVER_TYPE*
-- Transport: *$TRANSPORT*
-- Main Port ($MAIN_PORT): *$main_port_status*
-- Web Port ($WEB_PORT): *$web_port_status*"
+- Role: *$SERVER_TYPE*"
 
-    if [ "$SERVER_TYPE" == "server" ]; then
+    if [ -n "$TRANSPORT" ]; then
+        message+="\n- Transport: *$TRANSPORT*"
+    fi
+
+    if [[ "$SERVER_TYPE" == "server" ]]; then
+        message+="\n- Main Port ($MAIN_PORT): *$main_port_status*"
+        message+="\n- Web Port ($WEB_PORT): *$web_port_status*"
         message+="\n- Tunneled Ports: *$(if [ -n "$PORTS_STRING" ]; then echo "$PORTS_STRING"; else echo "None"; fi)*"
     elif [ "$SERVER_TYPE" == "client" ]; then
         message+="\n- Remote Server: *$REMOTE_IP:$MAIN_PORT*"
         if [ -n "$EDGE_IP" ]; then
             message+="\n- Edge IP: *$EDGE_IP*"
         fi
+        message+="\n- Web Port ($WEB_PORT): *$web_port_status*" # Client also has web_port
     fi
 
 
@@ -390,16 +426,47 @@ telegram_status_report() {
 
 # --- Backhaul Configuration Questions ---
 
+# Ask for Server or Client role (at the very beginning of install)
+ask_server_or_client() {
+    echo -e "\n--- Backhaul Role Configuration ---"
+    read -p "Configure as Server or Client? (server/client): " SERVER_TYPE_INPUT
+    SERVER_TYPE_INPUT=$(echo "$SERVER_TYPE_INPUT" | tr '[:upper:]' '[:lower:]')
+    if [[ "$SERVER_TYPE_INPUT" != "server" && "$SERVER_TYPE_INPUT" != "client" ]]; then
+        log "ERROR" "Invalid role. Please enter 'server' or 'client'."
+        exit 1
+    fi
+    SERVER_TYPE="$SERVER_TYPE_INPUT" # Set global variable
+}
+
+# Ask for transport protocol (common for both roles)
+ask_transport() {
+    echo -e "\n--- Transport Protocol Configuration ---"
+    echo "Available transports: tcp, tcpmux, udp, ws, wss, wsmux, wssmux"
+    read -p "Choose transport protocol (default: $TRANSPORT): " trans
+    if [ -n "$trans" ]; then TRANSPORT=$(echo "$trans" | tr '[:upper:]' '[:lower:]'); fi
+    case "$TRANSPORT" in
+        tcp|tcpmux|udp|ws|wss|wsmux|wssmux) ;;
+        *) log "ERROR" "Invalid transport protocol. Please choose from the list."; exit 1 ;;
+    esac
+}
+
 # Ask for common settings
 ask_common_settings() {
     echo -e "\n--- Common Backhaul Settings ---"
-    read -p "Enter your shared secret token (e.g., a strong password, default: random): " user_t
-    USER_TOKEN=${user_t:-$(head /dev/urandom | tr -dc A-Za-z0-9_ | head -c 16 ; echo '')}
+    # Only ask for token if not already set or if user wants to change
+    local current_token_display="${USER_TOKEN:+Set (current value will be hidden)}"
+    read -p "Enter your shared secret token (e.g., a strong password, default: ${current_token_display:-random}): " user_t
+    if [ -n "$user_t" ]; then
+        USER_TOKEN="$user_t"
+    elif [ -z "$USER_TOKEN" ]; then # If no input and no current token
+        USER_TOKEN=$(head /dev/urandom | tr -dc A-Za-z0-9_ | head -c 16 ; echo '')
+    fi
+
     if [ -z "$USER_TOKEN" ]; then
         log "ERROR" "Token cannot be empty."
         exit 1
     fi
-    log "INFO" "Token set: ${USER_TOKEN}"
+    log "INFO" "Token set: ${USER_TOKEN:+Set}" # Log whether it's set without showing value
 
     read -p "Enter keepalive period in seconds (default: $KEEPALIVE): " keepal
     if [ -n "$keepal" ]; then KEEPALIVE="$keepal"; fi
@@ -462,26 +529,36 @@ ask_mux_settings() {
 # Configure TLS settings (for wss/wssmux server)
 configure_tls() {
     echo -e "\n--- TLS Certificate Configuration (for wss/wssmux) ---"
+    
+    # Pre-fill current values if available
+    local current_tls_cert="$TLS_CERT"
+    local current_tls_key="$TLS_KEY"
+
     local cert_exists=false
     local key_exists=false
 
-    # Check if current cert/key exist
-    if [ -f "$TLS_CERT" ] && [ -f "$TLS_KEY" ]; then
-        log "INFO" "Existing TLS certificate and key found at: $TLS_CERT, $TLS_KEY"
+    if [ -n "$current_tls_cert" ] && [ -f "$current_tls_cert" ] && [ -n "$current_tls_key" ] && [ -f "$current_tls_key" ]; then
+        log "INFO" "Existing TLS certificate and key paths are configured."
+        echo "Current TLS Cert: $current_tls_cert"
+        echo "Current TLS Key: $current_tls_key"
         cert_exists=true
         key_exists=true
+    else
+        log "INFO" "No existing TLS certificate and key found/configured."
     fi
 
     if [[ "$cert_exists" == "true" && "$key_exists" == "true" ]]; then
-        read -p "Current TLS cert/key paths are set. Use current ($TLS_CERT, $TLS_KEY)? (y/n, default y): " use_current_tls
+        read -p "Use current TLS cert/key paths? (y/n, default y): " use_current_tls
         use_current_tls=${use_current_tls:-y}
         if [[ "$use_current_tls" =~ ^[Yy]$ ]]; then
             log "INFO" "Using existing TLS certificate and key."
             # Verify file permissions
-            if ! [ -r "$TLS_CERT" ] || ! [ -r "$TLS_KEY" ]; then
+            if ! [ -r "$current_tls_cert" ] || ! [ -r "$current_tls_key" ]; then
                 log "ERROR" "Existing TLS certificate or key files are not readable. Please check permissions."
                 exit 1
             fi
+            TLS_CERT="$current_tls_cert" # Ensure global vars are set
+            TLS_KEY="$current_tls_key"   # Ensure global vars are set
             return # Exit function, no need to ask more
         fi
     fi
@@ -500,7 +577,7 @@ configure_tls() {
         TLS_KEY="${BACKHAUL_DIR}/certs/server.key"
 
         openssl req -x509 -newkey rsa:4096 -keyout "$TLS_KEY" -out "$TLS_CERT" -days 365 -nodes \
-            -subj "/C=US/ST=State/L=City/O=Organization/OU=Unit/CN=$(hostname)" 2>/dev/null || {
+            -subj "/C=IR/ST=Tehran/L=Tehran/O=Backhaul/OU=IT/CN=$(hostname)" 2>/dev/null || { # Changed subject for Iran/Tehran
             log "ERROR" "Failed to generate self-signed certificate."
             exit 1
         }
@@ -570,7 +647,8 @@ ask_server_specific_settings() {
 # Ask for client-specific settings
 ask_client_specific_settings() {
     echo -e "\n--- Client Specific Settings ---"
-    read -p "Enter Remote Server IP or Hostname (e.g., example.com): " REMOTE_IP
+    read -p "Enter Remote Server IP or Hostname (e.g., example.com, default: $REMOTE_IP): " remote_ip_input
+    REMOTE_IP=${remote_ip_input:-$REMOTE_IP}
     if [ -z "$REMOTE_IP" ]; then
         log "ERROR" "Remote IP/Hostname cannot be empty for client."
         exit 1
@@ -617,7 +695,7 @@ load_current_config() {
         SERVER_TYPE="server"
     else
         log "WARNING" "Could not determine server/client role from config file. Assuming server."
-        SERVER_TYPE="server"
+        SERVER_TYPE="server" # Default to server if role not clear
     fi
 
     # Function to get value robustly, handling sections and types
@@ -653,13 +731,16 @@ load_current_config() {
     TRANSPORT=$(_get_toml_value "$SERVER_TYPE" "transport" "$TRANSPORT")
 
     # MUX settings (common across both roles if mux transport is used)
-    MUX_VERSION=$(_get_toml_value "$SERVER_TYPE" "mux_version" "$MUX_VERSION")
-    MUX_FRAMESIZE=$(_get_toml_value "$SERVER_TYPE" "mux_framesize" "$MUX_FRAMESIZE")
-    MUX_RECEIVEBUFFER=$(_get_toml_value "$SERVER_TYPE" "mux_recievebuffer" "$MUX_RECEIVEBUFFER")
-    MUX_STREAMBUFFER=$(_get_toml_value "$SERVER_TYPE" "mux_streambuffer" "$MUX_STREAMBUFFER")
+    # Check if these keys exist in the current config before overwriting defaults
+    if grep -q "mux_version" "$CONFIG_FILE"; then
+        MUX_VERSION=$(_get_toml_value "$SERVER_TYPE" "mux_version" "$MUX_VERSION")
+        MUX_FRAMESIZE=$(_get_toml_value "$SERVER_TYPE" "mux_framesize" "$MUX_FRAMESIZE")
+        MUX_RECEIVEBUFFER=$(_get_toml_value "$SERVER_TYPE" "mux_recievebuffer" "$MUX_RECEIVEBUFFER")
+        MUX_STREAMBUFFER=$(_get_toml_value "$SERVER_TYPE" "mux_streambuffer" "$MUX_STREAMBUFFER")
+    fi
 
     if [ "$SERVER_TYPE" == "server" ]; then
-        MAIN_PORT=$(_get_toml_value "server" "bind_addr" "$MAIN_PORT" | sed 's/.*://') # Extract port
+        MAIN_PORT=$(_get_toml_value "server" "bind_addr" "0.0.0.0:$MAIN_PORT" | sed 's/.*://') # Extract port
         HEARTBEAT=$(_get_toml_value "server" "heartbeat" "$HEARTBEAT")
         CHANNEL_SIZE=$(_get_toml_value "server" "channel_size" "$CHANNEL_SIZE")
         ACCEPT_UDP=$(_get_toml_value "server" "accept_udp" "$ACCEPT_UDP")
@@ -668,7 +749,6 @@ load_current_config() {
         MUX_CON=$(_get_toml_value "server" "mux_con" "$MUX_CON")
 
         # Handle 'ports' array: read it back as a comma-separated string for prompt
-        # This is a bit tricky; we'll read line by line until next section or EOF
         local ports_array_str=""
         local in_ports_section=0
         while IFS= read -r line; do
@@ -681,12 +761,13 @@ load_current_config() {
                     in_ports_section=0
                     break
                 fi
+                # Extract quoted string (e.g., "80", "127.0.0.1:443=5201")
                 if [[ "$line" =~ ^[[:space:]]*\"(.*)\"[[:space:]]*,? ]]; then
                     ports_array_str+="${BASH_REMATCH[1]},"
                 fi
             fi
         done < "$CONFIG_FILE"
-        PORTS_STRING=$(echo "${ports_array_str%,}" | sed 's/,"//g') # Remove trailing comma and quotes
+        PORTS_STRING=$(echo "${ports_array_str%,}") # Remove trailing comma
         if [ -z "$PORTS_STRING" ] && grep -q "^[[:space:]]*ports[[:space:]]*=[[:space:]]*\[[[:space:]]*\]" "$CONFIG_FILE"; then
             PORTS_STRING="" # Ensure it's empty if an empty array is found
         fi
@@ -726,8 +807,8 @@ install_backhaul() {
     local modify_settings="y"
     if [ -f "$CONFIG_FILE" ]; then
         load_current_config
-        log "INFO" "Existing config loaded. You can proceed with update/reinstall."
-        echo "Existing configuration detected. Current role: $SERVER_TYPE. Do you want to modify settings?"
+        log "INFO" "Existing config loaded. Current role: ${SERVER_TYPE:-Unknown}. Current Transport: ${TRANSPORT:-Unknown}."
+        echo "Existing configuration detected. Do you want to modify settings?"
         if ! confirm "Modify settings?"; then
             modify_settings="n"
             log "INFO" "Using existing settings for reinstallation."
@@ -800,7 +881,7 @@ EOF
         # Common server/client but placed here for server section logic
         echo "sniffer = $SNIFFER" >> "$CONFIG_FILE"
         echo "web_port = $WEB_PORT" >> "$CONFIG_FILE"
-        if [ -n "$SNIFFER_LOG" ]; then
+        if [ -n "$SNIFFER_LOG" ]; then # Only add sniffer_log if sniffer is true and log path is set
             echo "sniffer_log = \"$SNIFFER_LOG\"" >> "$CONFIG_FILE"
         fi
         echo "log_level = \"$LOG_LEVEL\"" >> "$CONFIG_FILE"
@@ -846,7 +927,7 @@ EOF
         if [ "$WEB_PORT" -ne 0 ]; then # Only add web_port if not disabled
             echo "web_port = $WEB_PORT" >> "$CONFIG_FILE"
         fi
-        if [ -n "$SNIFFER_LOG" ]; then
+        if [ -n "$SNIFFER_LOG" ]; then # Only add sniffer_log if sniffer is true and log path is set
             echo "sniffer_log = \"$SNIFFER_LOG\"" >> "$CONFIG_FILE"
         fi
         echo "log_level = \"$LOG_LEVEL\"" >> "$CONFIG_FILE"
@@ -940,7 +1021,7 @@ emergency_recovery() {
         echo "No main config file found at $CONFIG_FILE. Nothing to restore."
         read -p "Press Enter to continue..."
         return
-    }
+    fi # <--- اصلاح شده
 
     echo "Available backup config files:"
     BACKUPS=$(ls -t "${CONFIG_FILE}".*.bak 2>/dev/null)
@@ -948,7 +1029,7 @@ emergency_recovery() {
         echo "No backup config files found for $CONFIG_FILE."
         read -p "Press Enter to continue..."
         return
-    }
+    fi # <--- اصلاح شده
 
     echo "$BACKUPS" | nl -w 2 -s ') '
     read -p "Enter the number of the backup to restore, or 0 to cancel: " choice
@@ -956,7 +1037,7 @@ emergency_recovery() {
     if [[ "$choice" -eq 0 ]]; then
         log "INFO" "Backup restoration cancelled."
         return
-    fi
+    fi # <--- اصلاح شده
 
     local selected_backup=$(echo "$BACKUPS" | sed -n "${choice}p")
 
@@ -991,18 +1072,20 @@ tunnel_management_menu() {
     while true; do
         clear
         echo "=== Tunnel Management ==="
-        echo "1) Remove Tunnel (stop & disable service, remove files)"
-        echo "2) Edit Tunnel Config (nano)"
-        echo "3) Show Last Critical Errors"
-        echo "4) Emergency Recovery (Restore Backup Config)"
-        echo "5) Restart Service"
-        echo "6) View Service Status"
-        echo "7) Toggle Periodic Monitoring (Currently $([[ -f "$TELEGRAM_CONFIG" && $(crontab -l 2>/dev/null | fgrep -q "$MONITOR_SCRIPT"; echo $?) -eq 0 ]] && echo "Enabled" || echo "Disabled"))"
-        echo "8) Send Manual Telegram Status Report"
-        echo "9) Back to Main Menu"
+        echo "1) Install/Reinstall Backhaul" # Added for consistency and ease of access
+        echo "2) Remove Tunnel (stop & disable service, remove files)"
+        echo "3) Edit Tunnel Config (nano)"
+        echo "4) Show Last Critical Errors"
+        echo "5) Emergency Recovery (Restore Backup Config)"
+        echo "6) Restart Service"
+        echo "7) View Service Status"
+        echo "8) Toggle Periodic Monitoring (Currently $([[ -f "$TELEGRAM_CONFIG" && $(crontab -l 2>/dev/null | fgrep -q "$MONITOR_SCRIPT"; echo $?) -eq 0 ]] && echo "Enabled" || echo "Disabled"))"
+        echo "9) Send Manual Telegram Status Report"
+        echo "10) Back to Main Menu"
         read -p "Choose an option: " tchoice
         case $tchoice in
-            1)
+            1) install_backhaul ;; # Direct jump to reinstall
+            2)
                 if confirm "Are you sure you want to remove the tunnel (stop, disable service, and delete files)? This is irreversible."; then
                     log "INFO" "Attempting to remove Backhaul service and files."
                     disable_monitoring_cron # Disable cron and remove monitor script first
@@ -1023,7 +1106,7 @@ tunnel_management_menu() {
                     exit 0
                 fi
                 ;;
-            2)
+            3)
                 if [ -f "$CONFIG_FILE" ]; then
                     if ! command_exists nano; then
                         log "ERROR" "Nano is not installed. Please install it or edit $CONFIG_FILE manually."
@@ -1040,24 +1123,24 @@ tunnel_management_menu() {
                     read -p "Press Enter to continue..."
                 fi
                 ;;
-            3)
+            4)
                 show_last_errors
                 ;;
-            4)
+            5)
                 emergency_recovery
                 ;;
-            5)
+            6)
                 log "INFO" "Restarting Backhaul service."
                 systemctl restart ${SERVICE_NAME} || log "ERROR" "Failed to restart $SERVICE_NAME."
                 log "INFO" "Service restart command issued. Check status for confirmation."
                 read -p "Press Enter to continue..."
                 ;;
-            6)
+            7)
                 log "INFO" "Displaying Backhaul service status."
                 systemctl status ${SERVICE_NAME} --no-pager
                 read -p "Press Enter to continue..."
                 ;;
-            7)
+            8)
                 read_telegram_config # Make sure we have latest telegram settings
                 if [ -n "$BOT_TOKEN" ] && [ -n "$CHAT_ID" ]; then
                     if crontab -l 2>/dev/null | fgrep -q "$MONITOR_SCRIPT"; then
@@ -1078,12 +1161,12 @@ tunnel_management_menu() {
                 fi
                 read -p "Press Enter to continue..."
                 ;;
-            8)
+            9)
                 log "INFO" "Sending manual Telegram status report."
                 telegram_status_report
                 read -p "Press Enter to continue..."
                 ;;
-            9)
+            10)
                 break
                 ;;
             *)
@@ -1118,29 +1201,12 @@ main_menu() {
     done
 }
 
-# Ask for Server or Client role (at the very beginning of install)
-ask_server_or_client() {
-    echo -e "\n--- Backhaul Role Configuration ---"
-    read -p "Configure as Server or Client? (server/client): " SERVER_TYPE_INPUT
-    SERVER_TYPE_INPUT=$(echo "$SERVER_TYPE_INPUT" | tr '[:upper:]' '[:lower:]')
-    if [[ "$SERVER_TYPE_INPUT" != "server" && "$SERVER_TYPE_INPUT" != "client" ]]; then
-        log "ERROR" "Invalid role. Please enter 'server' or 'client'."
-        exit 1
-    fi
-    SERVER_TYPE="$SERVER_TYPE_INPUT" # Set global variable
-}
-
-# Ask for transport protocol (common for both roles)
-ask_transport() {
-    echo -e "\n--- Transport Protocol Configuration ---"
-    echo "Available transports: tcp, tcpmux, udp, ws, wss, wsmux, wssmux"
-    read -p "Choose transport protocol (default: $TRANSPORT): " trans
-    if [ -n "$trans" ]; then TRANSPORT=$(echo "$trans" | tr '[:upper:]' '[:lower:]'); fi
-    case "$TRANSPORT" in
-        tcp|tcpmux|udp|ws|wss|wsmux|wssmux) ;;
-        *) log "ERROR" "Invalid transport protocol. Please choose from the list."; exit 1 ;;
-    esac
-}
-
 # --- Script Entry Point ---
+# Ensure log file exists and user is root
+mkdir -p "$(dirname "$LOG_FILE")"
+touch "$LOG_FILE"
+chmod 640 "$LOG_FILE"
+log "INFO" "Script started."
+
+# Start the main menu
 main_menu
