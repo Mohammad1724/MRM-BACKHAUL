@@ -10,7 +10,7 @@ MONITOR_SCRIPT="/root/backhaul-monitor.sh"
 BOT_TOKEN=""
 CHAT_ID=""
 
-# --------- Backup configfile ------------
+# --------- Backup config file ------------
 backup_config() {
     local file="$1"
     if [ -f "$file" ]; then
@@ -283,6 +283,96 @@ ask_remote_ip_if_client() {
     fi
 }
 
+# --------- Telegram bot configuration ------------
+configure_telegram() {
+    read -p "Enter Telegram Bot Token (or leave empty to disable Telegram monitoring): " BOT_TOKEN
+    if [ -n "$BOT_TOKEN" ]; then
+        read -p "Enter Telegram Chat ID: " CHAT_ID
+        echo "Telegram monitoring enabled."
+    else
+        echo "Telegram monitoring disabled."
+    fi
+}
+
+# --------- Send Telegram status report ------------
+telegram_status_report() {
+    if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+        return
+    fi
+
+    local status
+    status=$(systemctl is-active $SERVICE_NAME)
+    local version
+    version=$($BACKHAUL_DIR/backhaul -v 2>/dev/null || echo "Unknown")
+    local open_ports
+    open_ports=$(ss -tuln | grep -E ":$main_port|:$web_port" | awk '{print $5}' | paste -sd "," -)
+
+    local message="Backhaul Status Report:
+- Service status: $status
+- Version: $version
+- Main port: $main_port
+- Web port: $web_port
+- Transport: $TRANSPORT
+- Open ports: $open_ports
+"
+
+    curl -s -X POST "https://api.telegram.org/bot$BOT_TOKEN/sendMessage" \
+        -d chat_id="$CHAT_ID" \
+        -d text="$message" > /dev/null
+}
+
+# --------- Emergency recovery ------------
+emergency_recovery() {
+    echo "Checking for backup config files..."
+    local backups=($(ls ${CONFIG_FILE}.bak.* 2>/dev/null || true))
+    if [ ${#backups[@]} -eq 0 ]; then
+        echo "No backup config files found."
+        return
+    fi
+
+    echo "Available backups:"
+    for i in "${!backups[@]}"; do
+        echo "$((i+1))) ${backups[$i]}"
+    done
+    while true; do
+        read -p "Select backup to restore (or 0 to cancel): " choice
+        if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 0 ] && [ "$choice" -le ${#backups[@]} ]; then
+            break
+        else
+            echo "Invalid choice."
+        fi
+    done
+
+    if [ "$choice" -eq 0 ]; then
+        echo "Recovery cancelled."
+        return
+    fi
+
+    cp "${backups[$((choice-1))]}" "$CONFIG_FILE"
+    echo "Backup restored."
+    systemctl restart $SERVICE_NAME
+    echo "Service restarted."
+}
+
+# --------- Show last critical errors from logs ------------
+show_last_errors() {
+    echo "Last 20 lines of Backhaul error/warning logs:"
+    journalctl -u $SERVICE_NAME -p warning -n 20 --no-pager
+    read -p "Press Enter to continue..."
+}
+
+# --------- Confirm prompt ------------
+confirm() {
+    while true; do
+        read -p "$1 (y/n): " yn
+        case $yn in
+            [Yy]*) return 0 ;;
+            [Nn]*) return 1 ;;
+            *) echo "Please answer yes or no." ;;
+        esac
+    done
+}
+
 # --------- Install Backhaul and configure ------------
 install_backhaul() {
     clear
@@ -304,6 +394,7 @@ install_backhaul() {
     ask_channel_size
     ask_sniffer_log
     ask_log_level
+    configure_telegram
 
     echo ""
     echo "Summary:"
@@ -321,6 +412,7 @@ install_backhaul() {
     echo "Channel size: $channel_size"
     echo "Sniffer log path: $sniffer_log"
     echo "Log level: $LOG_LEVEL"
+    echo "Telegram bot token set: $( [ -n "$BOT_TOKEN" ] && echo "Yes" || echo "No" )"
     echo ""
 
     # Detect arch and OS for download
@@ -398,6 +490,9 @@ EOF
     systemctl start ${SERVICE_NAME}
 
     echo "Backhaul installed and started successfully!"
+
+    telegram_status_report
+
     read -p "Press Enter to continue..."
 }
 
@@ -408,112 +503,10 @@ tunnel_management_menu() {
         echo "=== Tunnel Management ==="
         echo "1) Remove Tunnel (stop & disable service)"
         echo "2) Edit Tunnel Config (nano)"
-        echo "3) Edit Tunnel Ports (manual edit)"
-        echo "4) Back to Main Menu"
+        echo "3) Show Last Critical Errors"
+        echo "4) Emergency Recovery (Restore Backup Config)"
+        echo "5) Back to Main Menu"
         read -p "Choose an option: " tchoice
         case $tchoice in
             1)
-                systemctl stop $SERVICE_NAME || echo "Service not running"
-                systemctl disable $SERVICE_NAME || echo "Service not enabled"
-                echo "Tunnel removed (service stopped & disabled)."
-                read -p "Press Enter to continue..."
-                ;;
-            2|3)
-                if [ -f "$CONFIG_FILE" ]; then
-                    nano "$CONFIG_FILE"
-                else
-                    echo "Config file not found!"
-                    read -p "Press Enter to continue..."
-                fi
-                ;;
-            4) break ;;
-            *) echo "Invalid option!"; sleep 1 ;;
-        esac
-    done
-}
-
-# --------- Backhaul Management Menu ------------
-backhaul_management_menu() {
-    while true; do
-        clear
-        echo "=== Backhaul Management ==="
-        echo "1) Start Backhaul Service"
-        echo "2) Stop Backhaul Service"
-        echo "3) Restart Backhaul Service"
-        echo "4) Show Backhaul Status"
-        echo "5) Show Backhaul Logs"
-        echo "6) Back to Main Menu"
-        read -p "Choose an option: " bchoice
-        case $bchoice in
-            1)
-                systemctl start $SERVICE_NAME
-                echo "Backhaul service started."
-                read -p "Press Enter to continue..."
-                ;;
-            2)
-                systemctl stop $SERVICE_NAME
-                echo "Backhaul service stopped."
-                read -p "Press Enter to continue..."
-                ;;
-            3)
-                systemctl restart $SERVICE_NAME
-                echo "Backhaul service restarted."
-                read -p "Press Enter to continue..."
-                ;;
-            4)
-                systemctl status $SERVICE_NAME --no-pager
-                echo ""
-                read -p "Press Enter to continue..."
-                ;;
-            5)
-                echo "Showing logs (Ctrl+C to exit)..."
-                journalctl -u $SERVICE_NAME -f
-                ;;
-            6) break ;;
-            *) echo "Invalid option!"; sleep 1 ;;
-        esac
-    done
-}
-
-# --------- Remove Backhaul Completely ------------
-remove_backhaul_completely() {
-    echo "Removing Backhaul completely..."
-    systemctl stop $SERVICE_NAME || echo "Service not running"
-    systemctl disable $SERVICE_NAME || echo "Service not enabled"
-    rm -rf "$BACKHAUL_DIR"
-    rm -f /etc/systemd/system/$SERVICE_NAME.service
-    systemctl daemon-reload
-    echo "Backhaul completely removed."
-    read -p "Press Enter to continue..."
-}
-
-# --------- Update Backhaul Binary ------------
-update_backhaul() {
-    echo "Updating Backhaul binary..."
-    ARCH=$(uname -m)
-    case $ARCH in
-        x86_64) ARCH="amd64" ;;
-        aarch64|arm64) ARCH="arm64" ;;
-        *) echo "Unsupported architecture: $(uname -m)"; read -p "Press Enter to continue..."; return ;;
-    esac
-
-    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-    FILE_NAME="backhaul_${OS}_${ARCH}.tar.gz"
-
-    curl -fL -O "https://github.com/Musixal/Backhaul/releases/latest/download/$FILE_NAME" || { echo "Download failed!"; read -p "Press Enter to continue..."; return; }
-
-    mkdir -p "$BACKHAUL_DIR"
-    tar -xzf "$FILE_NAME" -C "$BACKHAUL_DIR"
-    rm -f "$FILE_NAME"
-
-    systemctl restart $SERVICE_NAME
-    echo "Backhaul updated and service restarted."
-    read -p "Press Enter to continue..."
-}
-
-# --------- Remove Installer Script ------------
-remove_installer_script() {
-    echo "Removing installer script file: $SCRIPT_PATH"
-    rm -f "$SCRIPT_PATH"
-    echo "Installer script removed. Exiting..."
-    exit 0
+                if confirm "Are you sure you want to remove the tunnel (stop &
