@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Configurable paths and defaults
+# Configurablepaths and defaults
 BACKHAUL_DIR="${BACKHAUL_DIR:-/opt/backhaul}"
 SERVICE_NAME="backhaul"
 CONFIG_FILE="${BACKHAUL_DIR}/config.toml"
