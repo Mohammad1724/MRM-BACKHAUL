@@ -10,7 +10,7 @@ MONITOR_SCRIPT="/root/backhaul-monitor.sh"
 BOT_TOKEN=""
 CHAT_ID=""
 
-# --------- Backup config file ------------
+# --------- Backup configfile ------------
 backup_config() {
     local file="$1"
     if [ -f "$file" ]; then
