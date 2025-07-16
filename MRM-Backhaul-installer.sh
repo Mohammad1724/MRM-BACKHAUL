@@ -452,4 +452,4 @@ telegram_monitoring_menu() {
     echo "3) Enable Monitoring"
     echo "4) Disable Monitoring"
     echo "5) Show Monitoring Status"
-    echo "6) Back to Main Menu
+    echo "6) Back to Main Menu"
