@@ -5,7 +5,7 @@ BACKHAUL_DIR="/root/backhaul" SERVICE_NAME="backhaul" CONFIG_FILE="$BACKHAUL_DIR
 
 BOT_TOKEN="" CHAT_ID="" MONITOR_SCRIPT="/root/backhaul-monitor.sh" LANG=en
 
----------------- Language Messages ----------------
+#---------------- Language Messages ----------------
 
 ask_lang() { echo "Select language / زبان را انتخاب کنید:" echo "1) English" echo "2) فارسی" read -p "Choice [1]: " lang_choice case $lang_choice in 2) LANG=fa ;; *) LANG=en ;; esac }
 
