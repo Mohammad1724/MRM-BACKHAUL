@@ -1,3 +1,4 @@
+👑 MOHAMMAD REZA MORADI 👑
 #!/bin/bash
 set -e
 
