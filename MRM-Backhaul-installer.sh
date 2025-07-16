@@ -446,6 +446,7 @@ telegram_monitoring_menu() {
     echo "=== Telegram Monitoring Menu ==="
     echo "Current BOT_TOKEN: $([ -z "$BOT_TOKEN" ] && echo 'Not set' || echo 'Set')"
     echo "Current CHAT_ID: $([ -z "$CHAT_ID" ] && echo 'Not set' || echo 'Set')"
+EOF
     echo ""
     echo "1) Set Telegram BOT Token"
     echo "2) Set Telegram Chat ID"
