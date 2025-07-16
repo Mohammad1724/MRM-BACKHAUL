@@ -2,187 +2,389 @@
 set -e
 
 BACKHAUL_DIR="/root/backhaul"
-CONFIG_DIR="$BACKHAUL_DIR/configs"
 SERVICE_NAME="backhaul"
+CONFIG_FILE="$BACKHAUL_DIR/config.toml"
 SCRIPT_PATH="$(readlink -f "$0")"
+MONITOR_SCRIPT="/root/backhaul-monitor.sh"
+
 BOT_TOKEN=""
 CHAT_ID=""
-LANG="en"
 
-# -------- Language --------
-ask_lang() {
-    echo "Select language / زبان را انتخاب کنید:"
-    echo "1) English"
-    echo "2) فارسی"
-    read -p "Choice [1]: " lang_choice
-    case $lang_choice in
-        2) LANG="fa" ;;
-        *) LANG="en" ;;
-    esac
-}
-
-msg() {
-    local en="$1"
-    local fa="$2"
-    [[ "$LANG" == "fa" ]] && echo "$fa" || echo "$en"
-}
-
-# -------- Confirm Deletion --------
-confirm_delete() {
-    local target="$1"
-    read -p "$(msg "Confirm delete $target? [y/N]: " "آیا از حذف $target مطمئن هستید؟ [y/N]: ")" confirm
-    [[ "$confirm" == "y" || "$confirm" == "Y" ]]
-}
-
-# -------- Backup Config --------
+# --------- Backup config file ------------
 backup_config() {
     local file="$1"
     if [ -f "$file" ]; then
         cp "$file" "${file}.bak.$(date +%Y%m%d%H%M%S)"
+        echo "Backup created: ${file}.bak.*"
     fi
 }
 
-# -------- Validate Port --------
+# --------- Edit key=value in toml config ------------
+edit_config_value() {
+    local file="$1"
+    local key="$2"
+    local new_value="$3"
+
+    if grep -q "^$key" "$file"; then
+        sed -i "s|^$key.*|$key = $new_value|" "$file"
+    else
+        echo "$key = $new_value" >> "$file"
+    fi
+}
+
+# --------- Validate port number ------------
 validate_port() {
     local port="$1"
     if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+        echo "Invalid port: $port"
         return 1
     fi
     return 0
 }
 
-# -------- Ask Port with Validation --------
-ask_port() {
-    local prompt="$1"
-    local default="$2"
-    local port=""
+# --------- Ask for ports with validation ------------
+ask_ports() {
     while true; do
-        read -p "$prompt" port
-        port=${port:-$default}
-        if validate_port "$port"; then
-            echo "$port"
+        read -p "Enter main tunnel port (default 3080): " main_port
+        main_port=${main_port:-3080}
+        validate_port "$main_port" && break
+        echo "Please enter a valid port number (1-65535)."
+    done
+
+    while true; do
+        read -p "Enter web port (default 2060): " web_port
+        web_port=${web_port:-2060}
+        validate_port "$web_port" && break
+        echo "Please enter a valid port number (1-65535)."
+    done
+
+    ports=()
+    while true; do
+        read -p "Enter additional port (or press Enter to finish): " extra_port
+        if [ -z "$extra_port" ]; then
             break
+        fi
+        if validate_port "$extra_port"; then
+            ports+=("$extra_port")
         else
-            echo "$(msg 'Invalid port, try again.' 'پورت نامعتبر است، دوباره وارد کنید.')"
+            echo "Invalid port number, try again."
         fi
     done
+
+    if [ ${#ports[@]} -gt 0 ]; then
+        ports_string="["
+        for p in "${ports[@]}"; do
+            ports_string+="$p, "
+        done
+        ports_string="${ports_string%, }]"
+    else
+        ports_string="[]"
+    fi
 }
 
-# -------- Ask Role --------
-ask_role() {
-    echo "Select role:"
-    echo "1) Server (Iran side)"
-    echo "2) Client (Foreign VPS)"
-    read -p "$(msg 'Choose role [1/2]: ' 'نقش را انتخاب کنید [1/2]: ')" role
-    case "$role" in
-        2) NODE_ROLE="client" ;;
-        *) NODE_ROLE="server" ;;
-    esac
-}
-
-# -------- Ask Transport --------
+# --------- Ask for transport type ------------
 ask_transport() {
-    echo "Select transport:"
+    echo "Select transport type:"
     echo "1) tcp"
     echo "2) tcpmux"
     echo "3) udp"
     echo "4) ws"
     echo "5) wss"
     echo "6) wsmux"
-    read -p "$(msg 'Choice [1-6]: ' 'انتخاب [1-6]: ')" choice
-    case "$choice" in
-        2) TRANSPORT="tcpmux" ;;
-        3) TRANSPORT="udp" ;;
-        4) TRANSPORT="ws" ;;
-        5) TRANSPORT="wss" ;;
-        6) TRANSPORT="wsmux" ;;
-        *) TRANSPORT="tcp" ;;
-    esac
+    while true; do
+        read -p "Choose transport [1]: " tchoice
+        tchoice=${tchoice:-1}
+        case $tchoice in
+            1) TRANSPORT="tcp"; break ;;
+            2) TRANSPORT="tcpmux"; break ;;
+            3) TRANSPORT="udp"; break ;;
+            4) TRANSPORT="ws"; break ;;
+            5) TRANSPORT="wss"; break ;;
+            6) TRANSPORT="wsmux"; break ;;
+            *) echo "Invalid choice. Try again." ;;
+        esac
+    done
 }
 
-# -------- Download Backhaul --------
-download_backhaul() {
-    ARCH=$(uname -m)
-    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-    case "$ARCH" in
-        x86_64) ARCH="amd64" ;;
-        aarch64|arm64) ARCH="arm64" ;;
-        *) echo "$(msg 'Unsupported architecture' 'معماری پشتیبانی نشده')" ; read -p "$(msg 'Press Enter' 'برای ادامه اینتر بزنید')" ; return 1 ;;
-    esac
-    FILE_NAME="backhaul_${OS}_${ARCH}.tar.gz"
-    echo "$(msg "Downloading $FILE_NAME..." "درحال دانلود $FILE_NAME ...")"
-    curl -fL -O "https://github.com/Musixal/Backhaul/releases/latest/download/$FILE_NAME" || { echo "$(msg 'Download failed' 'دانلود شکست خورد')" ; read -p "$(msg 'Press Enter' 'اینتر بزنید')" ; return 1 ; }
-    mkdir -p "$BACKHAUL_DIR"
-    tar -xzf "$FILE_NAME" -C "$BACKHAUL_DIR"
-    rm -f "$FILE_NAME"
+# --------- Ask for token ------------
+ask_token() {
+    read -p "Enter token (default 'your_token'): " user_token
+    user_token=${user_token:-your_token}
 }
 
-# -------- Create Config --------
-create_config() {
-    mkdir -p "$CONFIG_DIR"
-    if [[ "$NODE_ROLE" == "server" ]]; then
-        main_port=$(ask_port "$(msg 'Enter main port (default 3080): ' 'پورت اصلی (پیش‌فرض ۳۰۸۰): ')" 3080)
-        web_port=$(ask_port "$(msg 'Enter web port (default 2060): ' 'پورت وب (پیش‌فرض ۲۰۶۰): ')" 2060)
-        read -p "$(msg 'Enable sniffer? (y/N): ' 'فعال کردن sniffer؟ (y/N): ')" sn
-        [[ "$sn" == "y" || "$sn" == "Y" ]] && sniffer=true || sniffer=false
-        read -p "$(msg 'Enter token (default your_token): ' 'توکن را وارد کنید (پیش‌فرض your_token): ')" token
-        token=${token:-your_token}
-        ports_array=()
-        while true; do
-            extra_port=$(ask_port "$(msg 'Enter additional port or empty to finish: ' 'پورت اضافی یا خالی برای پایان: ')" "")
-            if [ -z "$extra_port" ]; then break; fi
-            ports_array+=("$extra_port")
-        done
-        ports_string="[]"
-        if [ ${#ports_array[@]} -gt 0 ]; then
-            ports_string="["
-            for p in "${ports_array[@]}"; do
-                ports_string+="$p, "
-            done
-            ports_string="${ports_string%, }]"
+# --------- Ask for sniffer setting ------------
+ask_sniffer() {
+    while true; do
+        read -p "Enable sniffer? (true/false, default false): " sniffer_input
+        sniffer_input=${sniffer_input:-false}
+        if [[ "$sniffer_input" =~ ^(true|false)$ ]]; then
+            SNIFFER="$sniffer_input"
+            break
+        else
+            echo "Please enter 'true' or 'false'."
         fi
-        cat > "$CONFIG_DIR/server_config.toml" <<EOF
-[server]
-bind_addr = "0.0.0.0:$main_port"
-transport = "$TRANSPORT"
-token = "$token"
-web_port = $web_port
-sniffer = $sniffer
-sniffer_log = "/root/backhaul.json"
-log_level = "info"
-ports = $ports_string
-EOF
-        ACTIVE_CONFIG="$CONFIG_DIR/server_config.toml"
-    else
-        read -p "$(msg 'Enter remote server address (IP:port): ' 'آدرس سرور ریموت (IP:port) را وارد کنید: ')" remote_addr
-        read -p "$(msg 'Enter token (default your_token): ' 'توکن را وارد کنید (پیش‌فرض your_token): ')" token
-        token=${token:-your_token}
-        read -p "$(msg 'Enter connection pool (default 4): ' 'Connection pool را وارد کنید (پیش‌فرض 4): ')" pool
-        pool=${pool:-4}
-        cat > "$CONFIG_DIR/client_config.toml" <<EOF
-[client]
-remote_addr = "$remote_addr"
-transport = "$TRANSPORT"
-token = "$token"
-connection_pool = $pool
-nodelay = true
-keepalive_period = 75
-dial_timeout = 10
-retry_interval = 3
-EOF
-        ACTIVE_CONFIG="$CONFIG_DIR/client_config.toml"
+    done
+}
+
+# --------- Ask for other settings ------------
+ask_keepalive() {
+    read -p "Enter keepalive period in seconds (default 75): " keepalive
+    keepalive=${keepalive:-75}
+}
+
+ask_nodelay() {
+    while true; do
+        read -p "Enable nodelay? (true/false, default true): " nodelay_input
+        nodelay_input=${nodelay_input:-true}
+        if [[ "$nodelay_input" =~ ^(true|false)$ ]]; then
+            NODELAY="$nodelay_input"
+            break
+        else
+            echo "Please enter 'true' or 'false'."
+        fi
+    done
+}
+
+ask_heartbeat() {
+    read -p "Enter heartbeat interval in seconds (default 40): " heartbeat
+    heartbeat=${heartbeat:-40}
+}
+
+ask_channel_size() {
+    read -p "Enter channel size (default 2048): " channel_size
+    channel_size=${channel_size:-2048}
+}
+
+ask_sniffer_log() {
+    read -p "Enter sniffer log path (default /root/backhaul.json): " sniffer_log
+    sniffer_log=${sniffer_log:-/root/backhaul.json}
+}
+
+ask_log_level() {
+    echo "Select log level:"
+    echo "1) error"
+    echo "2) warning"
+    echo "3) info (default)"
+    echo "4) debug"
+    while true; do
+        read -p "Choose log level [3]: " log_choice
+        log_choice=${log_choice:-3}
+        case $log_choice in
+            1) LOG_LEVEL="error"; break ;;
+            2) LOG_LEVEL="warning"; break ;;
+            3) LOG_LEVEL="info"; break ;;
+            4) LOG_LEVEL="debug"; break ;;
+            *) echo "Invalid choice. Try again." ;;
+        esac
+    done
+}
+
+# --------- Install acme.sh if missing ------------
+install_acme() {
+    if ! command -v acme.sh &> /dev/null; then
+        echo "acme.sh not found, installing..."
+        curl https://get.acme.sh | sh
+        export PATH="$HOME/.acme.sh:$PATH"
     fi
 }
 
-# -------- Setup systemd service for active config --------
-setup_systemd_service() {
-cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
+# --------- Obtain SSL certificate with acme.sh ------------
+obtain_ssl() {
+    local domain="$1"
+    install_acme
+
+    echo "Requesting SSL certificate for domain: $domain"
+    ~/.acme.sh/acme.sh --issue --standalone -d "$domain" --force
+
+    local cert_path="$HOME/.acme.sh/$domain/$domain.cer"
+    local key_path="$HOME/.acme.sh/$domain/$domain.key"
+
+    if [ -f "$cert_path" ] && [ -f "$key_path" ]; then
+        echo "Certificate obtained successfully."
+        sudo cp "$cert_path" /root/server.crt
+        sudo cp "$key_path" /root/server.key
+        echo "Certificates copied to /root/server.crt and /root/server.key"
+        return 0
+    else
+        echo "Failed to obtain certificate."
+        return 1
+    fi
+}
+
+# --------- Configure SSL if transport requires ------------
+configure_ssl_if_needed() {
+    if [[ "$TRANSPORT" == "wss" || "$TRANSPORT" == "wsmux" ]]; then
+        echo "Transport is $TRANSPORT — SSL is required."
+        while true; do
+            read -p "Enter your domain name (e.g. example.com) for SSL certificate: " domain
+            if [ -n "$domain" ]; then
+                break
+            else
+                echo "Domain cannot be empty."
+            fi
+        done
+
+        obtain_ssl "$domain" || return 1
+
+        edit_config_value "$CONFIG_FILE" "tls_cert" "\"/root/server.crt\""
+        edit_config_value "$CONFIG_FILE" "tls_key" "\"/root/server.key\""
+
+        echo "SSL paths updated in config."
+    else
+        echo "Transport is $TRANSPORT — SSL not required."
+    fi
+}
+
+# --------- Connectivity test (ping) ------------
+connectivity_test() {
+    read -p "Enter server IP or domain for connectivity test (or leave empty to skip): " server_test_ip
+    if [ -z "$server_test_ip" ]; then
+        echo "Skipping connectivity test."
+        return
+    fi
+    echo "Testing connectivity to $server_test_ip ..."
+    ping -c 4 "$server_test_ip"
+    read -p "Is the connectivity OK? (y/n): " ok
+    if [[ "$ok" != "y" && "$ok" != "Y" ]]; then
+        echo "Please fix connectivity before proceeding."
+        read -p "Press Enter to exit..."
+        exit 1
+    fi
+}
+
+# --------- Ask if server or client ------------
+ask_server_or_client() {
+    echo "Select server type:"
+    echo "1) Server (e.g. Iran server)"
+    echo "2) Client (e.g. Remote server outside Iran)"
+    while true; do
+        read -p "Choose 1 or 2: " sc
+        case $sc in
+            1) SERVER_TYPE="server"; break ;;
+            2) SERVER_TYPE="client"; break ;;
+            *) echo "Invalid choice. Try again." ;;
+        esac
+    done
+}
+
+# --------- Ask client remote server IP ------------
+ask_remote_ip_if_client() {
+    if [[ "$SERVER_TYPE" == "client" ]]; then
+        while true; do
+            read -p "Enter remote server IP or domain: " remote_ip
+            if [ -n "$remote_ip" ]; then
+                break
+            else
+                echo "Remote server IP/domain cannot be empty."
+            fi
+        done
+    else
+        remote_ip=""
+    fi
+}
+
+# --------- Install Backhaul and configure ------------
+install_backhaul() {
+    clear
+    echo "=== Backhaul Installation ==="
+
+    ask_server_or_client
+
+    ask_remote_ip_if_client
+
+    connectivity_test
+
+    ask_ports
+    ask_transport
+    ask_token
+    ask_sniffer
+    ask_keepalive
+    ask_nodelay
+    ask_heartbeat
+    ask_channel_size
+    ask_sniffer_log
+    ask_log_level
+
+    echo ""
+    echo "Summary:"
+    echo "Server type: $SERVER_TYPE"
+    [ -n "$remote_ip" ] && echo "Remote server IP/domain: $remote_ip"
+    echo "Main tunnel port: $main_port"
+    echo "Web port: $web_port"
+    echo "Additional ports: $ports_string"
+    echo "Transport: $TRANSPORT"
+    echo "Token: $user_token"
+    echo "Sniffer: $SNIFFER"
+    echo "Keepalive: $keepalive"
+    echo "Nodelay: $NODELAY"
+    echo "Heartbeat: $heartbeat"
+    echo "Channel size: $channel_size"
+    echo "Sniffer log path: $sniffer_log"
+    echo "Log level: $LOG_LEVEL"
+    echo ""
+
+    # Detect arch and OS for download
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64) ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        *) echo "Unsupported architecture: $(uname -m)"; read -p "Press Enter to continue..."; return ;;
+    esac
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    FILE_NAME="backhaul_${OS}_${ARCH}.tar.gz"
+
+    echo "Downloading $FILE_NAME..."
+    curl -fL -O "https://github.com/Musixal/Backhaul/releases/latest/download/$FILE_NAME" || { echo "Download failed!"; read -p "Press Enter to continue..."; return; }
+
+    mkdir -p "$BACKHAUL_DIR"
+    tar -xzf "$FILE_NAME" -C "$BACKHAUL_DIR"
+    rm -f "$FILE_NAME"
+
+    # Create config file if not exist
+    if [ ! -f "$CONFIG_FILE" ]; then
+        cat > "$CONFIG_FILE" <<EOF
+[server]
+bind_addr = "0.0.0.0:3080"
+transport = "tcp"
+token = "your_token"
+keepalive_period = 75
+nodelay = true
+heartbeat = 40
+channel_size = 2048
+sniffer = false
+web_port = 2060
+sniffer_log = "/root/backhaul.json"
+log_level = "info"
+ports = []
+EOF
+    fi
+
+    backup_config "$CONFIG_FILE"
+
+    edit_config_value "$CONFIG_FILE" "bind_addr" "\"0.0.0.0:${main_port}\""
+    edit_config_value "$CONFIG_FILE" "web_port" "$web_port"
+    edit_config_value "$CONFIG_FILE" "ports" "$ports_string"
+    edit_config_value "$CONFIG_FILE" "transport" "\"$TRANSPORT\""
+    edit_config_value "$CONFIG_FILE" "token" "\"$user_token\""
+    edit_config_value "$CONFIG_FILE" "sniffer" "$SNIFFER"
+    edit_config_value "$CONFIG_FILE" "keepalive_period" "$keepalive"
+    edit_config_value "$CONFIG_FILE" "nodelay" "$NODELAY"
+    edit_config_value "$CONFIG_FILE" "heartbeat" "$heartbeat"
+    edit_config_value "$CONFIG_FILE" "channel_size" "$channel_size"
+    edit_config_value "$CONFIG_FILE" "sniffer_log" "\"$sniffer_log\""
+    edit_config_value "$CONFIG_FILE" "log_level" "\"$LOG_LEVEL\""
+
+    configure_ssl_if_needed || { echo "SSL configuration failed."; read -p "Press Enter to continue..."; return; }
+
+    # Create systemd service
+    cat > /etc/systemd/system/${SERVICE_NAME}.service <<EOF
 [Unit]
 Description=Backhaul Reverse Tunnel Service
 After=network.target
 
 [Service]
-ExecStart=$BACKHAUL_DIR/backhaul -c $ACTIVE_CONFIG
+Type=simple
+ExecStart=${BACKHAUL_DIR}/backhaul -c ${CONFIG_FILE}
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -192,230 +394,126 @@ WantedBy=multi-user.target
 EOF
 
     systemctl daemon-reload
-    systemctl enable $SERVICE_NAME
-    systemctl restart $SERVICE_NAME
+    systemctl enable ${SERVICE_NAME}
+    systemctl start ${SERVICE_NAME}
+
+    echo "Backhaul installed and started successfully!"
+    read -p "Press Enter to continue..."
 }
 
-# -------- Install Backhaul --------
-install_backhaul() {
-    ask_role
-    ask_transport
-    if ! download_backhaul; then
-        return
-    fi
-    create_config
-    setup_systemd_service
-    msg "✅ Backhaul installed and running." "✅ بک‌هال نصب و در حال اجرا است."
-    read -p "$(msg 'Press Enter to continue...' 'برای ادامه اینتر بزنید...')"
-}
-
-# -------- Show last errors --------
-show_last_errors() {
-    clear
-    msg "Last Backhaul Errors:" "آخرین خطاهای بک‌هال:"
-    journalctl -u $SERVICE_NAME -n 100 --no-pager | grep -iE "error|fail|critical|warn" || msg "No recent critical errors found." "خطای بحرانی اخیر یافت نشد."
-    read -p "$(msg 'Press Enter to continue...' 'برای ادامه اینتر بزنید...')"
-}
-
-# -------- Connection Test --------
-connection_test() {
-    read -p "$(msg 'Enter IP or domain to test connection: ' 'آدرس IP یا دامنه برای تست اتصال: ')" host
-    if [ -z "$host" ]; then
-        msg "No host provided, skipping." "آدرسی وارد نشده، رد می‌شود."
-        read -p "$(msg 'Press Enter...' 'اینتر بزنید...')"
-        return
-    fi
-    msg "Pinging $host..." "در حال پینگ $host ..."
-    ping -c 4 "$host"
-    msg "Traceroute to $host:" "تریس‌ر‌وت به $host:"
-    traceroute "$host" || true
-    read -p "$(msg 'Press Enter to continue...' 'برای ادامه اینتر بزنید...')"
-}
-
-# -------- Start Backhaul Service --------
-start_service() {
-    systemctl start $SERVICE_NAME
-    msg "Backhaul service started." "سرویس بک‌هال شروع شد."
-    read -p "$(msg 'Press Enter...' 'اینتر بزنید...')"
-}
-
-# -------- Stop Backhaul Service --------
-stop_service() {
-    systemctl stop $SERVICE_NAME
-    msg "Backhaul service stopped." "سرویس بک‌هال متوقف شد."
-    read -p "$(msg 'Press Enter...' 'اینتر بزنید...')"
-}
-
-# -------- Restart Backhaul Service --------
-restart_service() {
-    systemctl restart $SERVICE_NAME
-    msg "Backhaul service restarted." "سرویس بک‌هال راه‌اندازی مجدد شد."
-    read -p "$(msg 'Press Enter...' 'اینتر بزنید...')"
-}
-
-# -------- Show Status --------
-show_status() {
-    systemctl status $SERVICE_NAME --no-pager
-    read -p "$(msg 'Press Enter...' 'اینتر بزنید...')"
-}
-
-# -------- Show Logs --------
-show_logs() {
-    echo "$(msg 'Showing logs (Ctrl+C to exit)...' 'نمایش لاگ‌ها (برای خروج Ctrl+C) ...')"
-    journalctl -u $SERVICE_NAME -f
-}
-
-# -------- Remove Backhaul Completely --------
-remove_backhaul() {
-    if confirm_delete "Backhaul and all configs"; then
-        systemctl stop $SERVICE_NAME || true
-        systemctl disable $SERVICE_NAME || true
-        rm -rf "$BACKHAUL_DIR"
-        rm -f /etc/systemd/system/${SERVICE_NAME}.service
-        systemctl daemon-reload
-        msg "Backhaul completely removed." "بک‌هال به طور کامل حذف شد."
-    else
-        msg "Deletion cancelled." "حذف لغو شد."
-    fi
-    read -p "$(msg 'Press Enter...' 'اینتر بزنید...')"
-}
-
-# -------- Telegram Monitoring Script --------
-MONITOR_SCRIPT="/root/backhaul-monitor.sh"
-
-create_monitor_script() {
-cat > "$MONITOR_SCRIPT" << 'EOF'
-#!/bin/bash
-BOT_TOKEN="__BOT_TOKEN__"
-CHAT_ID="__CHAT_ID__"
-SERVICE_NAME="backhaul"
-
-send_telegram() {
-    local message="$1"
-    curl -s -X POST "https://api.telegram.org/bot${BOT_TOKEN}/sendMessage" \
-         -d chat_id="${CHAT_ID}" \
-         -d text="${message}" >/dev/null
-}
-
-check_service() {
-    if ! systemctl is-active --quiet $SERVICE_NAME; then
-        send_telegram "🚨 Alert: Backhaul service is NOT running on $(hostname)! Restarting..."
-        systemctl restart $SERVICE_NAME
-        sleep 3
-        if systemctl is-active --quiet $SERVICE_NAME; then
-            send_telegram "✅ Backhaul service restarted successfully on $(hostname)."
-        else
-            send_telegram "❌ Failed to restart Backhaul service on $(hostname). Manual intervention needed."
-        fi
-    fi
-}
-
-check_logs() {
-    if journalctl -u $SERVICE_NAME -n 100 | grep -iE "error|fail|critical|warning" >/dev/null; then
-        send_telegram "⚠️ Warning: Backhaul logs show errors or warnings on $(hostname)!"
-    fi
-}
-
-check_service
-check_logs
-EOF
-
-    sed -i "s|__BOT_TOKEN__|$BOT_TOKEN|" "$MONITOR_SCRIPT"
-    sed -i "s|__CHAT_ID__|$CHAT_ID|" "$MONITOR_SCRIPT"
-    chmod +x "$MONITOR_SCRIPT"
-}
-
-enable_monitoring() {
-    (crontab -l 2>/dev/null | grep -v "$MONITOR_SCRIPT"; echo "*/5 * * * * $MONITOR_SCRIPT") | crontab -
-    msg "Monitoring enabled. Running every 5 minutes." "مانیتورینگ فعال شد. هر ۵ دقیقه اجرا می‌شود."
-    read -p "$(msg 'Press Enter...' 'اینتر بزنید...')"
-}
-
-disable_monitoring() {
-    crontab -l 2>/dev/null | grep -v "$MONITOR_SCRIPT" | crontab -
-    msg "Monitoring disabled." "مانیتورینگ غیرفعال شد."
-    read -p "$(msg 'Press Enter...' 'اینتر بزنید...')"
-}
-
-show_monitoring_status() {
-    if crontab -l 2>/dev/null | grep -q "$MONITOR_SCRIPT"; then
-        msg "Monitoring is ENABLED." "مانیتورینگ فعال است."
-    else
-        msg "Monitoring is DISABLED." "مانیتورینگ غیرفعال است."
-    fi
-    read -p "$(msg 'Press Enter...' 'اینتر بزنید...')"
-}
-
-telegram_monitoring_menu() {
+# --------- Tunnel Management Menu ------------
+tunnel_management_menu() {
     while true; do
         clear
-        echo "=== Telegram Monitoring Menu ==="
-        echo "Current BOT_TOKEN: $([ -z "$BOT_TOKEN" ] && echo 'Not set' || echo 'Set')"
-        echo "Current CHAT_ID: $([ -z "$CHAT_ID" ] && echo 'Not set' || echo 'Set')"
-        echo ""
-        echo "1) Set Telegram BOT Token"
-        echo "2) Set Telegram Chat ID"
-        echo "3) Enable Monitoring"
-        echo "4) Disable Monitoring"
-        echo "5) Show Monitoring Status"
-        echo "6) Back to Main Menu"
+        echo "=== Tunnel Management ==="
+        echo "1) Remove Tunnel (stop & disable service)"
+        echo "2) Edit Tunnel Config (nano)"
+        echo "3) Edit Tunnel Ports (manual edit)"
+        echo "4) Back to Main Menu"
         read -p "Choose an option: " tchoice
-
         case $tchoice in
             1)
-                read -p "Enter Telegram Bot Token: " BOT_TOKEN
-                if [ -n "$BOT_TOKEN" ]; then
-                    create_monitor_script
-                    echo "Bot Token set and monitoring script updated."
+                systemctl stop $SERVICE_NAME || echo "Service not running"
+                systemctl disable $SERVICE_NAME || echo "Service not enabled"
+                echo "Tunnel removed (service stopped & disabled)."
+                read -p "Press Enter to continue..."
+                ;;
+            2|3)
+                if [ -f "$CONFIG_FILE" ]; then
+                    nano "$CONFIG_FILE"
                 else
-                    echo "No token entered."
+                    echo "Config file not found!"
+                    read -p "Press Enter to continue..."
                 fi
+                ;;
+            4) break ;;
+            *) echo "Invalid option!"; sleep 1 ;;
+        esac
+    done
+}
+
+# --------- Backhaul Management Menu ------------
+backhaul_management_menu() {
+    while true; do
+        clear
+        echo "=== Backhaul Management ==="
+        echo "1) Start Backhaul Service"
+        echo "2) Stop Backhaul Service"
+        echo "3) Restart Backhaul Service"
+        echo "4) Show Backhaul Status"
+        echo "5) Show Backhaul Logs"
+        echo "6) Back to Main Menu"
+        read -p "Choose an option: " bchoice
+        case $bchoice in
+            1)
+                systemctl start $SERVICE_NAME
+                echo "Backhaul service started."
                 read -p "Press Enter to continue..."
                 ;;
             2)
-                read -p "Enter Telegram Chat ID: " CHAT_ID
-                if [ -n "$CHAT_ID" ]; then
-                    create_monitor_script
-                    echo "Chat ID set and monitoring script updated."
-                else
-                    echo "No chat ID entered."
-                fi
+                systemctl stop $SERVICE_NAME
+                echo "Backhaul service stopped."
                 read -p "Press Enter to continue..."
                 ;;
             3)
-                if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
-                    echo "Both BOT_TOKEN and CHAT_ID must be set first!"
-                    read -p "Press Enter to continue..."
-                else
-                    create_monitor_script
-                    enable_monitoring
-                fi
+                systemctl restart $SERVICE_NAME
+                echo "Backhaul service restarted."
+                read -p "Press Enter to continue..."
                 ;;
-            4) disable_monitoring ;;
-            5) show_monitoring_status ;;
+            4)
+                systemctl status $SERVICE_NAME --no-pager
+                echo ""
+                read -p "Press Enter to continue..."
+                ;;
+            5)
+                echo "Showing logs (Ctrl+C to exit)..."
+                journalctl -u $SERVICE_NAME -f
+                ;;
             6) break ;;
             *) echo "Invalid option!"; sleep 1 ;;
         esac
     done
 }
 
-# -------- Tunnel Management --------
-tunnel_management_menu() {
-    mkdir -p "$CONFIG_DIR"
-    while true; do
-        clear
-        echo "=== Tunnel Management ==="
-        echo "Existing profiles:"
-        local i=1
-        local profiles=()
-        for f in "$CONFIG_DIR"/*.toml; do
-            [ -f "$f" ] || continue
-            profiles+=("$f")
-            echo "$i) $(basename "$f")"
-            i=$((i+1))
-        done
-        echo "$i) Add New Profile"
-        echo "$((i+1))) Back to Main Menu"
-        read -p "Choose a profile: " choice
-        if [ "$choice" -eq "$i" ]; then
-            # Add new profile
+# --------- Remove Backhaul Completely ------------
+remove_backhaul_completely() {
+    echo "Removing Backhaul completely..."
+    systemctl stop $SERVICE_NAME || echo "Service not running"
+    systemctl disable $SERVICE_NAME || echo "Service not enabled"
+    rm -rf "$BACKHAUL_DIR"
+    rm -f /etc/systemd/system/$SERVICE_NAME.service
+    systemctl daemon-reload
+    echo "Backhaul completely removed."
+    read -p "Press Enter to continue..."
+}
+
+# --------- Update Backhaul Binary ------------
+update_backhaul() {
+    echo "Updating Backhaul binary..."
+    ARCH=$(uname -m)
+    case $ARCH in
+        x86_64) ARCH="amd64" ;;
+        aarch64|arm64) ARCH="arm64" ;;
+        *) echo "Unsupported architecture: $(uname -m)"; read -p "Press Enter to continue..."; return ;;
+    esac
+
+    OS=$(uname -s | tr '[:upper:]' '[:lower:]')
+    FILE_NAME="backhaul_${OS}_${ARCH}.tar.gz"
+
+    curl -fL -O "https://github.com/Musixal/Backhaul/releases/latest/download/$FILE_NAME" || { echo "Download failed!"; read -p "Press Enter to continue..."; return; }
+
+    mkdir -p "$BACKHAUL_DIR"
+    tar -xzf "$FILE_NAME" -C "$BACKHAUL_DIR"
+    rm -f "$FILE_NAME"
+
+    systemctl restart $SERVICE_NAME
+    echo "Backhaul updated and service restarted."
+    read -p "Press Enter to continue..."
+}
+
+# --------- Remove Installer Script ------------
+remove_installer_script() {
+    echo "Removing installer script file: $SCRIPT_PATH"
+    rm -f "$SCRIPT_PATH"
+    echo "Installer script removed. Exiting..."
+    exit 0
