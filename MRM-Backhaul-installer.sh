@@ -23,7 +23,7 @@ validate_port() { local port="$1" [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ]
 
 ---------------- Transport Selection ----------------
 
-choose_transport() { msg "Choose transport:" "انتخاب نوع ترنسپورت:" echo "1) tcp" echo "2) tcpmux" echo "3) udp" echo "4) ws" echo "5) wss" echo "6) wsmux" read -p "Choice [1]: " t_choice case $t_choice in 2) transport="tcpmux" ;; 3) transport="udp" ;; 4) transport="ws" ;; 5) transport="wss" ;; 6) transport="wsmux" ;; *) transport="tcp" ;; esac }
+choose_transport() { msg "Choose transport:" "انتخاب نوع‌ترنسپورت:" echo "1) tcp" echo "2) tcpmux" echo "3) udp" echo "4) ws" echo "5) wss" echo "6) wsmux" read -p "Choice [1]: " t_choice case $t_choice in 2) transport="tcpmux" ;; 3) transport="udp" ;; 4) transport="ws" ;; 5) transport="wss" ;; 6) transport="wsmux" ;; *) transport="tcp" ;; esac }
 
 ---------------- SSL Configuration ----------------
 
