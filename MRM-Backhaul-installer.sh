@@ -1,5 +1,5 @@
 #!/bin/bash
-set -e 
+set -e
 
 BACKHAUL_DIR="/root/backhaul"
 SERVICE_NAME="backhaul"
