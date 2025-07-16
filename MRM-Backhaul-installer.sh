@@ -5,7 +5,7 @@ BACKHAUL_DIR="/root/backhaul" SERVICE_NAME="backhaul" CONFIG_FILE="$BACKHAUL_DIR
 
 BOT_TOKEN="" CHAT_ID="" MONITOR_SCRIPT="/root/backhaul-monitor.sh" LANG=en
 
-#---------------- Language Messages ----------------
+# ---------------- Language Messages ----------------
 
 ask_lang() { echo "Select language / زبان را انتخاب کنید:" echo "1) English" echo "2) فارسی" read -p "Choice [1]: " lang_choice case $lang_choice in 2) LANG=fa ;; *) LANG=en ;; esac }
 
@@ -13,7 +13,7 @@ msg() { local en="$1" local fa="$2" [[ "$LANG" == "fa" ]] && echo "$fa" || echo 
 
 prompt() { local en="$1" local fa="$2" local var="$3" read -p "$(msg "$en" "$fa")" $var }
 
-#---------------- Config Editor ----------------
+# ---------------- Config Editor ----------------
 
 edit_config_value() { local file="$1"; local key="$2"; local val="$3" grep -q "^$key" "$file" && sed -i "s|^$key.*|$key = $val|" "$file" || echo "$key = $val" >> "$file" }
 
@@ -21,11 +21,11 @@ edit_config_value() { local file="$1"; local key="$2"; local val="$3" grep -q "^
 
 validate_port() { local port="$1" [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1 ] && [ "$port" -le 65535 ] }
 
-#---------------- Transport Selection ----------------
+# ---------------- Transport Selection ----------------
 
 choose_transport() { msg "Choose transport:" "انتخاب نوع‌ترنسپورت:" echo "1) tcp" echo "2) tcpmux" echo "3) udp" echo "4) ws" echo "5) wss" echo "6) wsmux" read -p "Choice [1]: " t_choice case $t_choice in 2) transport="tcpmux" ;; 3) transport="udp" ;; 4) transport="ws" ;; 5) transport="wss" ;; 6) transport="wsmux" ;; *) transport="tcp" ;; esac }
 
-#---------------- SSL Configuration ----------------
+# ---------------- SSL Configuration ----------------
 
 install_acme() { command -v acme.sh &>/dev/null || (curl https://get.acme.sh | sh) export PATH="$HOME/.acme.sh:$PATH" }
 
@@ -33,12 +33,12 @@ obtain_ssl() { local domain="$1" install_acme ~/.acme.sh/acme.sh --issue --stand
 
 configure_ssl_if_needed() { [[ "$role" != "server" ]] && return [[ "$transport" == "wss" || "$transport" == "wsmux" ]] || return prompt "Enter domain for SSL: " "دامنه جهت صدور گواهینامه SSL را وارد کنید: " domain [ -z "$domain" ] && return 1 obtain_ssl "$domain" edit_config_value "$CONFIG_FILE" "tls_cert" ""/root/server.crt"" edit_config_value "$CONFIG_FILE" "tls_key" ""/root/server.key"" }
 
-#---------------- Telegram Summary ----------------
+# ---------------- Telegram Summary ----------------
 
 send_summary_to_telegram() { [[ -z "$BOT_TOKEN" || -z "$CHAT_ID" ]] && return msg="✅ Backhaul installed\nRole: $role\nTransport: $transport\nToken: $token" [[ "$role" == "server" ]] && msg+="\nPort: $main_port\nWeb Port: $web_port" curl -s -X POST https://api.telegram.org/bot${BOT_TOKEN}/sendMessage 
 -d chat_id=${CHAT_ID} -d text="$msg" >/dev/null }
 
-#---------------- Install ----------------
+# ---------------- Install ----------------
 
 install_backhaul() { clear prompt "Is this Server or Client? [server/client]: " "سرور است یا کلاینت؟ [server/client]: " role role=${role,,} [[ "$role" != "server" && "$role" != "client" ]] && msg "Invalid role!" "نقش نامعتبر!" && return
 
@@ -86,7 +86,7 @@ read -p "Press Enter to continue..."
 
 }
 
-#---------------- Main Menu ----------------
+# ---------------- Main Menu ----------------
 
 main_menu() { ask_lang while true; do clear msg "=== Backhaul Manager ===" "=== مدیریت بک‌هال ===" echo "1) Install" echo "2) Exit" read -p "Choose: " c case $c in 1) install_backhaul ;; 2) exit 0 ;; esac done }
 
