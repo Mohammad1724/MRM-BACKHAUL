@@ -159,9 +159,9 @@ connectivity_test() {
 install_backhaul() {
     clear
     echo "=== Backhaul Installation ==="
-    
+
     connectivity_test
-    
+
     ask_ports
     echo ""
     echo "Ports entered:"
@@ -442,14 +442,86 @@ show_monitoring_status() {
 }
 
 telegram_monitoring_menu() {
-    clear
-    echo "=== Telegram Monitoring Menu ==="
-    echo "Current BOT_TOKEN: $([ -z "$BOT_TOKEN" ] && echo 'Not set' || echo 'Set')"
-    echo "Current CHAT_ID: $([ -z "$CHAT_ID" ] && echo 'Not set' || echo 'Set')"
-    echo ""
-    echo "1) Set Telegram BOT Token"
-    echo "2) Set Telegram Chat ID"
-    echo "3) Enable Monitoring"
-    echo "4) Disable Monitoring"
-    echo "5) Show Monitoring Status"
-    echo "6) Back to Main Menu"
+    while true; do
+        clear
+        echo "=== Telegram Monitoring Menu ==="
+        echo "Current BOT_TOKEN: $([ -z "$BOT_TOKEN" ] && echo 'Not set' || echo 'Set')"
+        echo "Current CHAT_ID: $([ -z "$CHAT_ID" ] && echo 'Not set' || echo 'Set')"
+        echo ""
+        echo "1) Set Telegram BOT Token"
+        echo "2) Set Telegram Chat ID"
+        echo "3) Enable Monitoring"
+        echo "4) Disable Monitoring"
+        echo "5) Show Monitoring Status"
+        echo "6) Back to Main Menu"
+        read -p "Choose an option: " tchoice
+        
+        case $tchoice in
+            1)
+                read -p "Enter Telegram Bot Token: " BOT_TOKEN
+                if [ -n "$BOT_TOKEN" ]; then
+                    create_monitor_script
+                    echo "Bot Token set and monitoring script updated."
+                else
+                    echo "No token entered."
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            2)
+                read -p "Enter Telegram Chat ID: " CHAT_ID
+                if [ -n "$CHAT_ID" ]; then
+                    create_monitor_script
+                    echo "Chat ID set and monitoring script updated."
+                else
+                    echo "No chat ID entered."
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            3)
+                if [ -z "$BOT_TOKEN" ] || [ -z "$CHAT_ID" ]; then
+                    echo "Both BOT_TOKEN and CHAT_ID must be set first!"
+                    read -p "Press Enter to continue..."
+                else
+                    create_monitor_script
+                    enable_monitoring
+                fi
+                ;;
+            4) disable_monitoring ;;
+            5) show_monitoring_status ;;
+            6) break ;;
+            *) echo "Invalid option!"; sleep 1 ;;
+        esac
+    done
+}
+
+# --------- Main Menu ------------
+main_menu() {
+    while true; do
+        clear
+        echo "=== Backhaul Management Script ==="
+        echo "1) Install Backhaul"
+        echo "2) Tunnel Management"
+        echo "3) Backhaul Service Management"
+        echo "4) Telegram Monitoring Setup"
+        echo "5) Update Backhaul Binary"
+        echo "6) Remove Backhaul Completely"
+        echo "7) Remove This Installer Script"
+        echo "8) Exit"
+        read -p "Choose an option: " choice
+        
+        case $choice in
+            1) install_backhaul ;;
+            2) tunnel_management_menu ;;
+            3) backhaul_management_menu ;;
+            4) telegram_monitoring_menu ;;
+            5) update_backhaul ;;
+            6) remove_backhaul_completely ;;
+            7) remove_installer_script ;;
+            8) exit 0 ;;
+            *) echo "Invalid option!"; sleep 1 ;;
+        esac
+    done
+}
+
+# Start the main menu
+main_menu
